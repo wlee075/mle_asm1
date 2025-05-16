@@ -59,7 +59,7 @@ def process_bronze_table(snapshot_date_str, bronze_lms_directory, spark, csv_fil
     delta_table_path = os.path.join(bronze_lms_directory, f"date={snapshot_date_str}")
     try:
         df_with_metadata.write.format("parquet") \
-            .mode("append") \
+            .mode("overwrite") \
             .partitionBy("snapshot_date") \
             .save(delta_table_path)
         print(f"Saved data to Parquet table at: {delta_table_path}")

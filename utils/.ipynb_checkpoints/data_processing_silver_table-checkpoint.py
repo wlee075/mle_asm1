@@ -2,8 +2,9 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import *
 from pyspark.sql.types import *
 import logging
-from datetime import datetime
 import os
+from pyspark.sql import functions as F
+from datetime import datetime, timedelta
 
 LOG_DIR = "logs"
 if not os.path.exists(LOG_DIR):
@@ -87,13 +88,12 @@ CLEANED_LMS_LOAN_SCHEMA = StructType([
     StructField("loan_start_date", DateType()),
     StructField("tenure", IntegerType()),
     StructField("installment_num", IntegerType()),
-    StructField("loan_amt", IntegerType()),
+    StructField("loan_amt", FloatType()),
     StructField("due_amt", FloatType()),
     StructField("paid_amt", FloatType()),
     StructField("overdue_amt", FloatType()),
     StructField("balance", FloatType()),
     StructField("_metadata_file_name", StringType()),
-    StructField("date", DateType()), 
     StructField("snapshot_date", DateType())
 ])
 
@@ -101,11 +101,11 @@ CLEANED_FINANCIALS_SCHEMA = StructType([
     StructField("Customer_ID", StringType(), nullable=True),
     StructField("Annual_Income", FloatType(), nullable=True),
     StructField("Monthly_Inhand_Salary", FloatType(), nullable=True),
-    StructField("Num_Bank_Accounts", StringType(), nullable=True),
+    StructField("Num_Bank_Accounts", IntegerType(), nullable=True),
     StructField("Num_Credit_Card", IntegerType(), nullable=True),
-    StructField("Interest_Rate", FloatType(), nullable=True),
+    StructField("Interest_Rate", IntegerType(), nullable=True),
     StructField("Num_of_Loan", IntegerType(), nullable=True),
-    StructField("Delay_from_due_date", StringType(), nullable=True),
+    StructField("Delay_from_due_date", IntegerType(), nullable=True),
     StructField("Num_of_Delayed_Payment", FloatType(), nullable=True),
     StructField("Changed_Credit_Limit", FloatType(), nullable=True),
     StructField("Num_Credit_Inquiries", IntegerType(), nullable=True),
@@ -138,7 +138,6 @@ CLEANED_ATTRIBUTES_SCHEMA = StructType([
     StructField("SSN", StringType()),
     StructField("Occupation", StringType()),
     StructField("_metadata_file_name", StringType()),
-    StructField("date", DateType()), 
     StructField("snapshot_date", DateType())
 ])
 
@@ -146,7 +145,6 @@ CLEANED_CLICKSTREAM_SCHEMA = StructType([
     *[StructField(f"fe_{i}", IntegerType()) for i in range(1, 21)],
     StructField("Customer_ID", StringType()),
     StructField("_metadata_file_name", StringType()),
-    StructField("date", DateType()), 
     StructField("snapshot_date", DateType())
 ])
 
@@ -184,17 +182,36 @@ class DataProcessor:
             raise
 
     def write_parquet(self, df, path, source_type):
-        try:
-            expected_schema = CLEANED_SCHEMA_MAP[source_type]
-            cleaned_df = df.select(expected_schema.fieldNames())
-            cleaned_df.repartition("snapshot_date").write \
-                .partitionBy("snapshot_date") \
-                .mode("append") \
-                .parquet(path)
-        except Exception as e:
-            logger.error(f"Write failed to {path}: {e}")
-            raise
+            try:
+                expected_schema = CLEANED_SCHEMA_MAP[source_type]
+                cleaned_df = df.select(expected_schema.fieldNames())
+                if self.spark._jvm.org.apache.hadoop.fs.FileSystem.get(self.spark._jsc.hadoopConfiguration()).exists(
+                    self.spark._jvm.org.apache.hadoop.fs.Path(path)
+                ):
+                    existing_df = self.spark.read.parquet(path)
+                    relevant_columns = [col for col in cleaned_df.columns if col not in ["snapshot_date", "_metadata_file_name"]]
+                    if set(relevant_columns) != set([col for col in existing_df.columns if col not in ["snapshot_date", "_metadata_file_name"]]):
+                        raise ValueError("Schema mismatch between incoming DataFrame and existing Parquet file.")
+                    cleaned_df = cleaned_df.repartition("snapshot_date")
+                    existing_df = existing_df.repartition("snapshot_date")
+                    cleaned_df = cleaned_df.withColumn("unique_id", F.concat_ws("_", *cleaned_df.columns))
+                    existing_df = existing_df.withColumn("unique_id", F.concat_ws("_", *existing_df.columns))
+                    common_rows = cleaned_df.select("unique_id").intersect(existing_df.select("unique_id"))
+                    if common_rows.count() == cleaned_df.count():
+                        logger.info(f"No new data to append to {path}. Skipping write operation.")
+                        return
+                    cleaned_df = cleaned_df.drop("unique_id")
+                cleaned_df.repartition("snapshot_date").write \
+                    .partitionBy("snapshot_date") \
+                    .mode("append") \
+                    .parquet(path)
+                logger.info(f"Data successfully appended to {path}.")
+            
+            except Exception as e:
+                logger.error(f"Write failed to {path}: {e}")
+                raise
 
+        
     def clean_loan_types(self, df):
         return df.withColumn(
             "Loan_Types",
@@ -213,7 +230,7 @@ class DataProcessor:
         return df.drop("Loan_Types", "Type_of_Loan")
 
     def process_lms_loan(self, df):
-        return df \
+        result = df \
             .withColumn("loan_start_date", to_date(col("loan_start_date"), "yyyy-MM-dd")) \
             .withColumn("due_amt", regexp_replace(col("due_amt"), "_", "").cast(FloatType())) \
             .withColumn("tenure", regexp_replace(col("tenure"), "_", "").cast(IntegerType())) \
@@ -223,10 +240,18 @@ class DataProcessor:
             .withColumn("overdue_amt", regexp_replace(col("overdue_amt"), "_", "").cast(FloatType())) \
             .withColumn("balance", regexp_replace(col("balance"), "_", "").cast(FloatType())) \
             .withColumn("snapshot_date", to_date(col("snapshot_date"), "yyyy-MM-dd"))
+        return result
 
     def process_financials(self, df):
-        return df \
+        result = df \
             .withColumn("Annual_Income", regexp_replace("Annual_Income", "_", "").cast(FloatType())) \
+            .withColumn("Changed_Credit_Limit", col("Changed_Credit_Limit").cast("float")) \
+            .withColumn("Credit_Utilization_Ratio", col("Credit_Utilization_Ratio").cast("float")) \
+            .withColumn("Amount_invested_monthly", col("Amount_invested_monthly").cast("float")) \
+            .withColumn("Monthly_Balance", col("Monthly_Balance").cast("float")) \
+            .withColumn("Total_EMI_per_month", col("Total_EMI_per_month").cast("float")) \
+            .withColumn("Outstanding_Debt", col("Outstanding_Debt").cast("float")) \
+            .withColumn("Monthly_Inhand_Salary", regexp_replace("Monthly_Inhand_Salary", "_", "").cast(FloatType())) \
             .withColumn("Num_of_Loan", regexp_replace("Num_of_Loan", "_", "").cast(IntegerType())) \
             .withColumn("Num_of_Delayed_Payment", 
                        regexp_replace("Num_of_Delayed_Payment", "_", "").cast(FloatType())) \
@@ -263,6 +288,7 @@ class DataProcessor:
                  .otherwise(None)
             ) \
             .drop("Credit_History_Age")
+        return result
 
     def process_attributes(self, df):
         return df \
@@ -289,19 +315,21 @@ class DataProcessor:
             raise ValueError("Schema mismatch in processed data.")
         logger.info("Processed schema validation passed.")
 
-    def process_bronze_to_silver(self, bronze_path, silver_path, dates, source_type):
-        
+    def path_exists(self, local_path):
+        return os.path.exists(local_path)
+
+    def process_bronze_to_silver(self, bronze_path, silver_path, dates, source_type, retention_days=30):
         for date_str in dates:
             try:
                 schema = SCHEMA_MAP[source_type]
                 self.validate_parquet_schema(bronze_path, schema)
                 df = self.read_parquet(bronze_path, schema) \
                     .filter(col("snapshot_date") == date_str) \
-                    .drop("date") \
-                    .dropDuplicates()
-
-                logger.info(f"Initial DataFrame count after filtering for {date_str}: {df.count()}")
-
+                    .drop("date")
+                silver_snapshot_path = f"{silver_path}/snapshot_date={date_str}"
+                if self.path_exists(silver_snapshot_path):
+                    logger.info(f"Data for {date_str} already exists in silver. Skipping.")
+                    continue
                 if source_type == 'lms_loan_daily':
                     processed_df = self.process_lms_loan(df)
                 elif source_type == 'features_financials':
@@ -310,16 +338,17 @@ class DataProcessor:
                     processed_df = self.process_attributes(df)
                 elif source_type == 'feature_clickstream':
                     processed_df = df
-
                 logger.info(f"Processed DataFrame count for {date_str}: {processed_df.count()}")
                 logger.info(f"Processed DataFrame schema for {date_str}: {processed_df.schema}")
-
                 expected_schema = CLEANED_SCHEMA_MAP[source_type]
                 self.validate_processed_schema(processed_df, expected_schema)
                 logger.debug(f"Writing processed data to {silver_path} for {date_str}")
-                self.write_parquet(processed_df, silver_path, source_type)
-                logger.debug(f"schema is {processed_df.printSchema()}")
+                self.write_parquet(
+                    processed_df,
+                    silver_path,
+                    source_type=source_type
+                )
                 logger.info(f"Successfully processed {source_type} for {date_str}")
-                
+    
             except Exception as e:
                 logger.error(f"Processing failed for {date_str}: {e}")
