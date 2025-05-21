@@ -270,6 +270,7 @@ class DataProcessor:
             df.withColumn(
                 "loan_start_date", to_date(col("loan_start_date"), "yyyy-MM-dd")
             )
+            .withColumn("Customer_ID", trim(lower(col("Customer_ID"))))
             .withColumn(
                 "due_amt", regexp_replace(col("due_amt"), "_", "").cast(FloatType())
             )
@@ -303,6 +304,7 @@ class DataProcessor:
                 "Annual_Income",
                 regexp_replace("Annual_Income", "_", "").cast(FloatType()),
             )
+            .withColumn("Customer_ID", trim(lower(col("Customer_ID"))))
             .withColumn(
                 "Changed_Credit_Limit", col("Changed_Credit_Limit").cast("float")
             )
@@ -332,7 +334,7 @@ class DataProcessor:
             )
             .withColumn(
                 "Payment_Behaviour",
-                when(col("Payment_Behaviour") == "!@9#%8", None).otherwise(
+                when(col("Payment_Behaviour") == "!@9#%8", "unknown").otherwise(
                     col("Payment_Behaviour")
                 ),
             )
@@ -386,7 +388,7 @@ class DataProcessor:
             df.withColumn(
                 "Age", regexp_replace(col("Age"), "_", "").cast(IntegerType())
             )
-            .transform(lambda df: self.remove_outliers(df, ["Age"]))
+            .withColumn("Customer_ID", trim(lower(col("Customer_ID"))))
             .withColumn(
                 "SSN",
                 when(col("SSN").rlike("^\\d{3}-\\d{2}-\\d{4}$"), col("SSN")).otherwise(
@@ -394,18 +396,6 @@ class DataProcessor:
                 ),
             )
         )
-
-    def remove_outliers(self, df, columns, threshold=1.5):
-        for col_name in columns:
-            bounds = df.approxQuantile(col_name, [0.25, 0.75], 0.01)
-            if bounds:
-                Q1, Q3 = bounds
-                IQR = Q3 - Q1
-                df = df.filter(
-                    (col(col_name) >= Q1 - threshold * IQR)
-                    & (col(col_name) <= Q3 + threshold * IQR)
-                )
-        return df
 
     def validate_processed_schema(self, df, expected_schema):
         if df.schema != expected_schema:
@@ -485,12 +475,11 @@ class SilverDataMart:
     def snapshot_df(self):
         if "_snapshot" not in self.tables:
             sdf = (
-                self.lms_df.select("snapshot_date", "_metadata_file_name")
-                .union(self.cs_df.select("snapshot_date", "_metadata_file_name"))
-                .union(self.fa_df.select("snapshot_date", "_metadata_file_name"))
-                .union(self.ff_df.select("snapshot_date", "_metadata_file_name"))
+                self.lms_df.select("snapshot_date")
+                .union(self.cs_df.select("snapshot_date"))
+                .union(self.fa_df.select("snapshot_date"))
+                .union(self.ff_df.select("snapshot_date"))
                 .distinct()
-                .withColumn("snapshot_id", F.monotonically_increasing_id())
             )
             self.tables["_snapshot"] = sdf
         return self.tables["_snapshot"]
@@ -547,99 +536,102 @@ class SilverDataMart:
         cs_unpivot = self.cs_df.select(
             F.col("Customer_ID").alias("customer_id"),
             "snapshot_date",
-            "_metadata_file_name",
-            F.expr(
-                f"stack({len(feature_cols)}, {expr_str}) " "as (feature_name, value)"
-            ),
+            F.expr(f"stack({len(feature_cols)}, {expr_str}) as (feature_name, value)"),
         )
 
-        df = (
-            cs_unpivot.join(
-                self.snapshot_df,
-                on=["snapshot_date", "_metadata_file_name"],
-                how="left",
-            )
-            .join(self.tables["dim_feature"], on="feature_name", how="left")
-            .select("customer_id", "feature_id", "value", "snapshot_id")
-        )
+        df = cs_unpivot.join(
+            self.tables["dim_feature"], on="feature_name", how="left"
+        ).select("customer_id", "feature_id", "value", "snapshot_date")
         self.tables["fact_clickstream"] = df
 
     def build_fact_financials(self):
-        df = (
-            self.ff_df.alias("f")
-            .join(self.snapshot_df, on=["snapshot_date", "_metadata_file_name"])
-            .select(
-                F.col("f.Customer_ID").alias("customer_id"),
-                "snapshot_id",
-                "Annual_Income",
-                "Monthly_Inhand_Salary",
-                "Num_Bank_Accounts",
-                "Num_Credit_Card",
-                "Interest_Rate",
-                "Num_of_Loan",
-                "Delay_from_due_date",
-                "Num_of_Delayed_Payment",
-                "Changed_Credit_Limit",
-                "Num_Credit_Inquiries",
-                "Outstanding_Debt",
-                "Credit_Utilization_Ratio",
-                "Total_EMI_per_month",
-                "Amount_invested_monthly",
-                F.col("f.Payment_of_Min_Amount").alias("payment_code"),
-                F.col("f.Payment_Behaviour").alias("payment_behaviour_id"),
-                F.col("f.Credit_Mix").alias("credit_mix_id"),
-                "Credit_History_Years",
-                "Credit_History_Months",
-            )
+        df = self.ff_df.alias("f").select(
+            F.col("f.Customer_ID").alias("customer_id"),
+            "snapshot_date",
+            "Annual_Income",
+            "Monthly_Inhand_Salary",
+            "Num_Bank_Accounts",
+            "Num_Credit_Card",
+            "Interest_Rate",
+            "Num_of_Loan",
+            "Delay_from_due_date",
+            "Num_of_Delayed_Payment",
+            "Changed_Credit_Limit",
+            "Num_Credit_Inquiries",
+            "Outstanding_Debt",
+            "Credit_Utilization_Ratio",
+            "Total_EMI_per_month",
+            "Amount_invested_monthly",
+            F.col("f.Payment_of_Min_Amount").alias("payment_code"),
+            F.col("f.Payment_Behaviour").alias("payment_behaviour_id"),
+            F.col("f.Credit_Mix").alias("credit_mix_id"),
+            "Credit_History_Years",
+            "Credit_History_Months",
         )
         self.tables["fact_financials"] = df
 
     def build_fact_loan(self):
-        df = (
-            self.lms_df.alias("l")
-            .join(self.snapshot_df, on=["snapshot_date", "_metadata_file_name"])
-            .select(
-                F.col("l.loan_id"),
-                F.col("l.Customer_ID").alias("customer_id"),
-                "snapshot_id",
-                "loan_start_date",
-                "tenure",
-                "installment_num",
-                "loan_amt",
-                "due_amt",
-                "paid_amt",
-                "overdue_amt",
-                "balance",
+        # add month on book and days past due
+        df = self.lms_df.alias("l").select(
+            col("l.loan_id"),
+            col("l.Customer_ID").alias("customer_id"),
+            col("installment_num").cast(IntegerType()).alias("mob"),
+            when(
+                col("due_amt") > 0,
+                ceil(col("overdue_amt") / col("due_amt")).cast(IntegerType()),
             )
+            .otherwise(lit(0))
+            .alias("installments_missed"),
+            when(
+                col("installments_missed") > 0,
+                add_months(col("snapshot_date"), -col("installments_missed")).cast(
+                    DateType()
+                ),
+            )
+            .otherwise(lit(None).cast(DateType()))
+            .alias("first_missed_date"),
+            when(
+                col("overdue_amt") > 0,
+                datediff(col("snapshot_date"), col("first_missed_date")),
+            )
+            .otherwise(lit(0))
+            .cast(IntegerType())
+            .alias("dpd"),
+            col("snapshot_date"),
+            col("loan_start_date"),
+            col("tenure"),
+            col("loan_amt"),
+            col("due_amt"),
+            col("paid_amt"),
+            col("overdue_amt"),
+            col("balance"),
         )
         self.tables["fact_loan"] = df
 
     def _quote(self, col_name: str) -> str:
         specials = {"-", " ", "/", ".", "+"}
         return f"`{col_name}`" if any(ch in col_name for ch in specials) else col_name
-    
-    
+
     def build_fact_customer_loan_type(self):
         loan_flag_cols = self.tables["_loan_flag_cols"]
-        flag_expr = ",".join(
-            [f"'{c}', {self._quote(c)}" for c in loan_flag_cols]
-        )
-        loan_flags_unpivot = (
-            self.ff_df
-            .select(
+
+        flag_expr = ",".join([f"'{col}', {self._quote(col)}" for col in loan_flag_cols])
+
+        df = (
+            self.ff_df.select(
                 F.col("Customer_ID").alias("customer_id"),
-                "snapshot_date", "_metadata_file_name",
+                "snapshot_date",
                 F.expr(
                     f"stack({len(loan_flag_cols)}, {flag_expr}) "
                     "as (loan_flag_col, flag_value)"
-                )
+                ),
             )
             .filter("flag_value = 1")
-            .join(self.snapshot_df, on=["snapshot_date", "_metadata_file_name"])
-            .join(self.tables["dim_loan_type"], on="loan_flag_col")
-            .select("customer_id", "loan_type_id", "snapshot_id")
+            .join(self.tables["dim_loan_type"], on="loan_flag_col", how="left")
+            .select("customer_id", "loan_type_id", "snapshot_date")
         )
-        self.tables["fact_customer_loan_type"] = loan_flags_unpivot
+
+        self.tables["fact_customer_loan_type"] = df
 
     def run(self, write_mode: str = "overwrite", preview: bool = False):
         _ = self.snapshot_df
@@ -669,4 +661,3 @@ class SilverDataMart:
                 logger.info(f"\nSchema – {name}")
                 df.printSchema()
                 df.show(5, truncate=False)
-
