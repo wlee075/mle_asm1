@@ -1,0 +1,98 @@
+# Byte-compiled Python files
+__pycache__/
+*.py[cod]
+
+# Distribution / packaging
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+*.egg-info/
+dist/
+build/
+develop-eggs/
+eggs/
+parts/
+sdist/
+var/
+*.egg
+MANIFEST
+
+# Logs and databases
+*.log
+*.sqlite3
+*.db
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# IDE/editor specific files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Virtual Environment
+.venv/
+pip-wheel-metadata/
+htmlcov/
+
+# Testing
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+
+# PyCharm
+.idea/
+*.iml
+
+# Docker
+docker-compose.override.yml
+.dockerenv
+
+# Environment variables
+.env
+.flaskenv
+
+# Logs and cache
+logs/
+*.tmp
+
+# Sphinx documentation
+docs/_build/
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.coverage*
+.cache/
+nosetests.xml
+coverage.xml
+*.cover
+
+# Translations
+*.mo
+
+# macOS
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Linux
+*~
